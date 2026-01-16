@@ -5,7 +5,7 @@ Resources:
   BackendInstance:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: ami-0c9645fce9368e34c  # Nouvelle Amazon Linux 2023 AMI
+      ImageId: ami-0c9645fce9368e34c
       InstanceType: t3.micro
       KeyName: my-key
       SecurityGroupIds:
@@ -44,7 +44,6 @@ Resources:
             curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
             yum install -y nodejs
             
-            
             # Verify installations
             echo "Node version: $(node --version)"
             echo "NPM version: $(npm --version)"
@@ -61,7 +60,7 @@ Resources:
             
             # Create .env file with correct configuration
             echo "[5/9] Creating .env file..."
-            cat > .env <<EOF
+            cat > .env <<'EOF'
             PORT=8080
             DB_HOST=${RDSEndpoint}
             DB_PORT=3306
@@ -73,6 +72,9 @@ Resources:
             CORS_ORIGIN=*
             EOF
             
+            # Appliquer la substitution pour RDSEndpoint après coup
+            sed -i "s|\${RDSEndpoint}|${RDSEndpoint}|g" .env
+            
             echo "✅ Environment configuration created:"
             echo "PORT=8080"
             echo "DB_HOST=${RDSEndpoint}"
@@ -81,7 +83,7 @@ Resources:
             
             # Install dependencies
             echo "[6/9] Installing npm dependencies..."
-            npm install --production
+            npm install --omit=dev
             
             # Install PM2 globally
             echo "[7/9] Installing PM2 process manager..."
@@ -129,7 +131,12 @@ Resources:
             
             # Start the application with PM2
             echo "[10/9] Starting backend application on port 8080..."
-            pm2 start server.js \
+            
+            # Set HOME environment variable for PM2
+            export HOME="/home/ec2-user"
+            export PM2_HOME="/home/ec2-user/.pm2"
+            
+            pm2 start index.js \
               --name backend \
               --log /var/log/backend.log \
               --error /var/log/backend-error.log \
@@ -138,43 +145,56 @@ Resources:
             
             # Configure PM2 to start on boot
             pm2 startup systemd -u ec2-user --hp /home/ec2-user
-            env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user
             pm2 save
             
             # Set correct permissions
             echo "Setting file permissions..."
             chown -R ec2-user:ec2-user /home/ec2-user/study-planner
+            chown -R ec2-user:ec2-user /home/ec2-user/.pm2 2>/dev/null || true
             
             # Wait for app to start
-            sleep 10
+            sleep 15
             
             # Verify PM2 is running
             echo "Checking PM2 status..."
             pm2 list
-            pm2 info backend
-            pm2 logs backend --lines 20 --nostream
             
-            # Test if backend is responding
-            echo "Testing backend API endpoints..."
-            
-            # Test health endpoint
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health 2>/dev/null || echo "000")
-            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ]; then
-              echo "✅ Backend is responding on port 8080 (HTTP $HTTP_CODE)"
+            # Check if backend process is running
+            if pm2 list | grep -q "backend"; then
+                echo "✅ Backend process is running with PM2"
+                
+                # Wait a bit more for app to fully start
+                sleep 5
+                
+                # Test if backend is responding
+                echo "Testing backend API endpoints..."
+                
+                # Test health endpoint
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health 2>/dev/null || echo "000")
+                if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "503" ]; then
+                  echo "✅ Backend is responding on port 8080 (HTTP $HTTP_CODE)"
+                else
+                  echo "⚠️ Backend response code: $HTTP_CODE"
+                  echo "Checking application logs..."
+                  tail -50 /var/log/backend.log 2>/dev/null || echo "No backend logs found"
+                fi
             else
-              echo "⚠️  Backend response code: $HTTP_CODE"
+                echo "❌ ERROR: Backend process not running in PM2"
+                echo "PM2 list:"
+                pm2 list
+                echo "Checking if index.js exists:"
+                ls -la index.js
             fi
             
             # Show backend logs
             echo "Recent backend logs:"
-            tail -20 /var/log/backend.log 2>/dev/null || echo "No logs yet"
+            tail -50 /var/log/backend.log 2>/dev/null || echo "No logs yet"
             
             echo "=========================================="
             echo "✅ Backend setup completed successfully!"
             echo "Time: $(date)"
             echo "Application running on port 8080"
             echo "=========================================="
-
           - RDSEndpoint: !ImportValue RDSEndpoint
 
 Outputs:

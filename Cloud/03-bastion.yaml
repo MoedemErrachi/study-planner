@@ -6,7 +6,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: t3.micro
-      ImageId: ami-0c02fb55956c7d316
+      ImageId: ami-0c9645fce9368e34c
       SubnetId: !Select [0, !Split [",", !ImportValue PublicSubnets]]
       SecurityGroupIds: [!ImportValue SGBastion]
       KeyName: my-key
