@@ -129,6 +129,58 @@ Resources:
               echo "❌ WARNING: Database 'studyplanner' not found"
             fi
             
+            # ==============================================
+            # CREATE TASKS TABLE ONLY
+            # ==============================================
+            echo "Creating tasks table..."
+            
+            # Créer la table tasks avec uniquement les champs demandés
+            cat > /tmp/create_tasks.sql <<'SQL_EOF'
+            USE studyplanner;
+            
+            -- Create tasks table with only required fields
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                notes TEXT,
+                due_date DATE NULL,
+                completed BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            
+            -- Show created tables
+            SHOW TABLES;
+            
+            -- Show table structure
+            DESCRIBE tasks;
+            
+            -- Show sample data
+            SELECT * FROM tasks;
+            SQL_EOF
+            
+            # Execute SQL script
+            echo "Executing SQL script to create tasks table..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 < /tmp/create_tasks.sql
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Tasks table created successfully!"
+            else
+              echo "⚠️ Warning: There might have been issues creating the table"
+            fi
+            
+            # Verify tasks table was created
+            echo "Verifying tasks table structure..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -D studyplanner -e "DESCRIBE tasks;" 2>&1
+            
+            # Count rows in tasks table
+            echo "Checking tasks count..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -D studyplanner -e "SELECT COUNT(*) as task_count FROM tasks;" 2>&1
+            
+            # ==============================================
+            # END CREATE TABLES SECTION
+            # ==============================================
+            
             # Start the application with PM2
             echo "[10/9] Starting backend application on port 8080..."
             
@@ -167,17 +219,28 @@ Resources:
                 sleep 5
                 
                 # Test if backend is responding
-                echo "Testing backend API endpoints..."
+                echo "Testing backend endpoints..."
                 
-                # Test health endpoint
-                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health 2>/dev/null || echo "000")
+                # Test health endpoint (if exists)
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null || echo "000")
                 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "503" ]; then
                   echo "✅ Backend is responding on port 8080 (HTTP $HTTP_CODE)"
                 else
-                  echo "⚠️ Backend response code: $HTTP_CODE"
-                  echo "Checking application logs..."
-                  tail -50 /var/log/backend.log 2>/dev/null || echo "No backend logs found"
+                  echo "⚠️ Backend health endpoint response code: $HTTP_CODE"
                 fi
+                
+                # Test tasks endpoint directly (without /api prefix)
+                echo "Testing /tasks endpoint..."
+                TASKS_RESPONSE=$(curl -s -w "\nHTTP: %{http_code}" http://localhost:8080/tasks 2>/dev/null || echo "Failed to connect")
+                echo "Tasks endpoint response:"
+                echo "$TASKS_RESPONSE"
+                
+                # Check if we can create a new task
+                echo "Testing POST /tasks..."
+                curl -X POST http://localhost:8080/tasks \
+                  -H "Content-Type: application/json" \
+                  -d '{"title":"Test Task","notes":"This is a test","due_date":"2026-01-20"}' \
+                  -s -w "\nHTTP: %{http_code}\n"
             else
                 echo "❌ ERROR: Backend process not running in PM2"
                 echo "PM2 list:"
@@ -190,10 +253,18 @@ Resources:
             echo "Recent backend logs:"
             tail -50 /var/log/backend.log 2>/dev/null || echo "No logs yet"
             
+            # Show database connection info
+            echo "Database connection details:"
+            echo "Host: ${RDSEndpoint}"
+            echo "Database: studyplanner"
+            echo "User: admin"
+            
             echo "=========================================="
             echo "✅ Backend setup completed successfully!"
             echo "Time: $(date)"
             echo "Application running on port 8080"
+            echo "Tasks table created with fields: id, title, notes, due_date, created_at, updated_at"
+            echo "Endpoints: /tasks (GET, POST, PUT, DELETE)"
             echo "=========================================="
           - RDSEndpoint: !ImportValue RDSEndpoint
 
