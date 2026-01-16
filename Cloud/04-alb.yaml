@@ -20,6 +20,14 @@ Resources:
       Port: 80
       Protocol: HTTP
       TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200
       Tags: [{ Key: Name, Value: tg-frontend }]
 
   TGBE:
@@ -30,6 +38,14 @@ Resources:
       Port: 8080
       Protocol: HTTP
       TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      HealthCheckPath: /health
+      Matcher:
+        HttpCode: 200
       Tags: [{ Key: Name, Value: tg-backend }]
 
   ListenerFE:

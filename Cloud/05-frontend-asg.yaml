@@ -14,7 +14,8 @@ Resources:
           - !ImportValue SGFE
         KeyName: my-key
         UserData:
-          Fn::Base64: !Sub |
+          Fn::Base64: !Sub 
+          - |
             #!/bin/bash
             # Log everything to user-data.log
             exec > >(tee /var/log/user-data.log)
@@ -26,12 +27,12 @@ Resources:
             echo "=========================================="
             
             # Update system
-            echo "[1/8] Updating system packages..."
+            echo "[1/9] Updating system packages..."
             yum update -y
             
-            # Install Node.js 18
-            echo "[2/8] Installing Node.js 18..."
-            curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
+            # Install Node.js 22
+            echo "[2/9] Installing Node.js 22..."
+            curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
             yum install -y nodejs git
             
             # Verify Node installation
@@ -39,78 +40,195 @@ Resources:
             echo "NPM version: $(npm --version)"
             
             # Install nginx
-            echo "[3/8] Installing nginx..."
+            echo "[3/9] Installing nginx..."
             yum install -y nginx
             systemctl start nginx
             systemctl enable nginx
             echo "Nginx installed and started"
             
             # Clone the repository
-            echo "[4/8] Cloning repository from MoedemErrachi/study-planner..."
+            echo "[4/9] Cloning repository from MoedemErrachi/study-planner..."
             cd /home/ec2-user
-            git clone https://github.com/MoedemErrachi/study-planner.git
-            cd study-planner/frontend
             
-            # Get ALB DNS for backend API
-            echo "[5/8] Getting ALB DNS..."
-            ALB_DNS=$(aws elbv2 describe-load-balancers \
-              --query 'LoadBalancers[0].DNSName' \
-              --output text \
-              --region us-east-1 2>/dev/null || echo "localhost")
+            # Clean up if exists
+            rm -rf study-planner
+            
+            git clone https://github.com/MoedemErrachi/study-planner.git
+            
+            # Vérifier la structure du répertoire
+            echo "Checking repository structure..."
+            ls -la /home/ec2-user/study-planner/
+            
+            # Naviguer vers le répertoire client
+            if [ -d "/home/ec2-user/study-planner/client" ]; then
+                cd /home/ec2-user/study-planner/client
+                echo "✅ Found client directory"
+            else
+                echo "❌ ERROR: 'client' directory not found!"
+                echo "Available directories:"
+                find /home/ec2-user/study-planner -maxdepth 2 -type d
+                exit 1
+            fi
+            
+            echo "Repository cloned successfully"
+            echo "Directory contents:"
+            ls -la
+            
+            # Set correct ownership immediately
+            echo "Setting correct file permissions..."
+            chown -R ec2-user:ec2-user /home/ec2-user/study-planner
+            # Fix: Set execute permissions for node_modules binaries
+            find /home/ec2-user/study-planner/client/node_modules/.bin -type f -exec chmod +x {} \; 2>/dev/null || true
+            
+            # Use the ALB DNS for backend API
+            echo "[5/9] Setting up backend API URL..."
+            echo "Backend ALB DNS: ${ALBDNS}"
             
             # Create production environment file
-            echo "[6/8] Creating .env.production file..."
-            cat > .env.production <<EOF
-            VITE_API_BASE=http://${!ALB_DNS}:8080/api
-            EOF
+            echo "[6/9] Creating .env.production file..."
             
-            echo "Backend API configured: http://${!ALB_DNS}:8080/api"
+            # Run as ec2-user to avoid permission issues
+            su - ec2-user -c "
+            cd /home/ec2-user/study-planner/client
+            echo 'VITE_API_URL=http://${ALBDNS}:8080' > .env.production
+            echo 'Backend API configured in .env.production:'
             cat .env.production
+            "
             
-            # Install dependencies and build
-            echo "[7/8] Installing npm dependencies..."
-            npm install --production
+            # Fix: Set proper permissions and install dependencies
+            echo "[7/9] Installing npm dependencies..."
+            su - ec2-user -c "
+            cd /home/ec2-user/study-planner/client
+            npm install
+            # Fix: Ensure vite binary has execute permissions
+            chmod +x node_modules/.bin/vite 2>/dev/null || true
+            "
             
-            echo "[8/8] Building frontend application..."
+            echo "[8/9] Building frontend application..."
+            su - ec2-user -c "
+            cd /home/ec2-user/study-planner/client
             npm run build
+            "
             
             # Verify build succeeded
-            if [ -d "dist" ]; then
+            if [ -d "/home/ec2-user/study-planner/client/dist" ]; then
               echo "✅ Build successful! dist folder created"
-              ls -la dist/
+              echo "Build contents:"
+              ls -la /home/ec2-user/study-planner/client/dist/
+              
+              # Check for index.html
+              if [ -f "/home/ec2-user/study-planner/client/dist/index.html" ]; then
+                echo "✅ index.html found in dist folder"
+              else
+                echo "⚠️  WARNING: index.html not found in dist folder"
+                echo "Looking for HTML files:"
+                find /home/ec2-user/study-planner/client/dist -name "*.html" -type f
+              fi
             else
               echo "❌ ERROR: Build failed - no dist folder found!"
+              echo "Checking for build errors..."
+              # Try to run build again with more output
+              su - ec2-user -c "cd /home/ec2-user/study-planner/client && npm run build 2>&1"
               exit 1
             fi
             
             # Configure nginx
-            echo "Configuring nginx..."
-            cat > /etc/nginx/conf.d/frontend.conf <<'EOF'
+            echo "[9/9] Configuring nginx..."
+            
+            # First, completely remove all default nginx configurations
+            rm -f /etc/nginx/conf.d/*.conf
+            rm -f /etc/nginx/sites-enabled/* 2>/dev/null || true
+            rm -f /etc/nginx/sites-available/* 2>/dev/null || true
+            
+            # Create nginx config
+            cat > /etc/nginx/conf.d/frontend.conf <<EOF
             server {
                 listen 80;
                 server_name _;
-                root /home/ec2-user/study-planner/frontend/dist;
-                index index.html;
+                root /var/www/frontend;
+                index index.html index.htm;
+                
+                # Disable server tokens for security
+                server_tokens off;
                 
                 # Gzip compression
                 gzip on;
+                gzip_vary on;
+                gzip_min_length 1024;
                 gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+                
+                # Security headers
+                add_header X-Frame-Options "SAMEORIGIN" always;
+                add_header X-Content-Type-Options "nosniff" always;
+                add_header X-XSS-Protection "1; mode=block" always;
                 
                 # Serve static files
                 location / {
-                    try_files $uri $uri/ /index.html;
+                    try_files \$uri \$uri/ /index.html;
                 }
                 
                 # Cache static assets
-                location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+                location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)\$ {
                     expires 1y;
                     add_header Cache-Control "public, immutable";
                 }
             }
             EOF
             
-            # Remove default nginx config
-            rm -f /etc/nginx/conf.d/default.conf
+            # Create a standard web directory and copy files there
+            echo "Setting up web directory..."
+            mkdir -p /var/www/frontend
+            cp -r /home/ec2-user/study-planner/client/dist/* /var/www/frontend/
+            
+            # Set proper permissions for nginx to access files
+            echo "Setting proper permissions for nginx..."
+            chown -R nginx:nginx /var/www/frontend
+            chmod -R 755 /var/www/frontend
+            find /var/www/frontend -type f -exec chmod 644 {} \;
+            
+            # Also fix home directory permissions for nginx to traverse
+            chmod 755 /home/ec2-user
+            chmod 755 /home/ec2-user/study-planner
+            chmod 755 /home/ec2-user/study-planner/client
+            chmod 755 /home/ec2-user/study-planner/client/dist
+            
+            # Also update the main nginx.conf to not include default server
+            # Backup original nginx.conf
+            cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.backup
+            
+            # Create a clean nginx.conf
+            cat > /etc/nginx/nginx.conf <<'MAINEOF'
+            user nginx;
+            worker_processes auto;
+            error_log /var/log/nginx/error.log;
+            pid /run/nginx.pid;
+            
+            include /usr/share/nginx/modules/*.conf;
+            
+            events {
+                worker_connections 1024;
+            }
+            
+            http {
+                log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+                                  '\$status \$body_bytes_sent "\$http_referer" '
+                                  '"\$http_user_agent" "\$http_x_forwarded_for"';
+            
+                access_log  /var/log/nginx/access.log  main;
+            
+                sendfile            on;
+                tcp_nopush          on;
+                tcp_nodelay         on;
+                keepalive_timeout   65;
+                types_hash_max_size 4096;
+            
+                include             /etc/nginx/mime.types;
+                default_type        application/octet-stream;
+            
+                # Include modular configuration files
+                include /etc/nginx/conf.d/*.conf;
+            }
+            MAINEOF
             
             # Test nginx configuration
             echo "Testing nginx configuration..."
@@ -120,27 +238,66 @@ Resources:
               echo "✅ Nginx configuration valid"
             else
               echo "❌ ERROR: Nginx configuration invalid!"
+              echo "Checking nginx error log..."
+              tail -20 /var/log/nginx/error.log 2>/dev/null || echo "No error log found"
               exit 1
             fi
             
             # Restart nginx
             echo "Restarting nginx..."
             systemctl restart nginx
-            systemctl status nginx
             
-            # Set correct permissions
-            echo "Setting file permissions..."
-            chown -R ec2-user:ec2-user /home/ec2-user/study-planner
-            chmod -R 755 /home/ec2-user/study-planner/frontend/dist
+            # Check nginx status
+            echo "Checking nginx status..."
+            systemctl status nginx --no-pager
             
             # Verify nginx is serving content
             echo "Testing nginx endpoint..."
-            curl -I http://localhost:80 || echo "Warning: Nginx not responding on port 80"
+            sleep 5  # Wait for nginx to fully restart
+            
+            # Try multiple times to connect
+            HTTP_CODE="000"
+            for i in {1..10}; do
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 2>/dev/null || echo "000")
+              if [ "$HTTP_CODE" = "200" ]; then
+                echo "✅ Nginx is responding on port 80 (HTTP $HTTP_CODE)"
+                
+                # Test if we can serve the frontend
+                echo "Testing frontend page..."
+                curl -s http://localhost:80 | head -20
+                curl -s http://localhost:80 | grep -i "<html\|<!DOCTYPE" && echo "✅ HTML content detected" || echo "⚠️  No HTML content found"
+                break
+              else
+                echo "Attempt $i/10: Nginx not responding (HTTP $HTTP_CODE), waiting 3 seconds..."
+                sleep 3
+              fi
+            done
+            
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "⚠️  WARNING: Nginx may not be serving content properly"
+              echo "Checking nginx processes..."
+              ps aux | grep nginx | grep -v grep
+              echo "Checking port 80..."
+              netstat -tlnp | grep :80 || echo "Nothing listening on port 80"
+              echo "Nginx error logs:"
+              tail -100 /var/log/nginx/error.log 2>/dev/null || echo "No error logs found"
+              echo "Nginx access logs:"
+              tail -50 /var/log/nginx/access.log 2>/dev/null || echo "No access logs found"
+            fi
+            
+            # Show final directory structure
+            echo "Final directory structure:"
+            echo "Frontend path: /var/www/frontend"
+            ls -la /var/www/frontend/
             
             echo "=========================================="
             echo "✅ Frontend setup completed successfully!"
             echo "Time: $(date)"
+            echo "Nginx serving from: /var/www/frontend"
+            echo "Backend API URL: http://${ALBDNS}:8080"
+            echo "Frontend accessible at: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || hostname -i)"
             echo "=========================================="
+          - ALBDNS: !ImportValue ALBDNS
         TagSpecifications:
           - ResourceType: instance
             Tags:
@@ -166,6 +323,9 @@ Resources:
         - !ImportValue TGFEArn
       HealthCheckType: ELB
       HealthCheckGracePeriod: 300
+      Cooldown: 300
+      TerminationPolicies:
+        - Default
       Tags:
         - Key: Name
           Value: frontend-asg-instance
@@ -176,6 +336,58 @@ Resources:
         - Key: Application
           Value: study-planner
           PropagateAtLaunch: true
+
+  CPUUtilizationAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale up if CPU > 60% for 5 minutes
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 60
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ASGFrontend
+
+  CPUUtilizationAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale down if CPU < 20% for 15 minutes
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 6
+      Threshold: 20
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ASGFrontend
+
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ASGFrontend
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      Cooldown: 300
+      StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 1
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ASGFrontend
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      Cooldown: 600
+      StepAdjustments:
+        - MetricIntervalUpperBound: 0
+          ScalingAdjustment: -1
 
 Outputs:
   LaunchTemplateId:

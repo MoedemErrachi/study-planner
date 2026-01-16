@@ -134,11 +134,12 @@ Resources:
             # ==============================================
             echo "Creating tasks table..."
             
-            # Créer la table tasks avec uniquement les champs demandés
+            # Créer la table tasks avec uniquement les champs demandés + completed
             cat > /tmp/create_tasks.sql <<'SQL_EOF'
             USE studyplanner;
+
             
-            -- Create tasks table with only required fields
+            -- Create tasks table with only required fields including completed
             CREATE TABLE IF NOT EXISTS tasks (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 title VARCHAR(255) NOT NULL,
@@ -146,7 +147,9 @@ Resources:
                 due_date DATE NULL,
                 completed BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_completed (completed),
+                INDEX idx_due_date (due_date)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             
             -- Show created tables
@@ -155,8 +158,15 @@ Resources:
             -- Show table structure
             DESCRIBE tasks;
             
-            -- Show sample data
+            -- Show all tasks
             SELECT * FROM tasks;
+            
+            -- Show completed vs pending tasks
+            SELECT 
+                completed, 
+                COUNT(*) as count 
+            FROM tasks 
+            GROUP BY completed;
             SQL_EOF
             
             # Execute SQL script
@@ -174,8 +184,8 @@ Resources:
             mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -D studyplanner -e "DESCRIBE tasks;" 2>&1
             
             # Count rows in tasks table
-            echo "Checking tasks count..."
-            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -D studyplanner -e "SELECT COUNT(*) as task_count FROM tasks;" 2>&1
+            echo "Checking tasks count and completion status..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -D studyplanner -e "SELECT COUNT(*) as total_tasks, SUM(completed) as completed_tasks FROM tasks;" 2>&1
             
             # ==============================================
             # END CREATE TABLES SECTION
@@ -230,17 +240,33 @@ Resources:
                 fi
                 
                 # Test tasks endpoint directly (without /api prefix)
-                echo "Testing /tasks endpoint..."
+                echo "Testing GET /tasks endpoint..."
                 TASKS_RESPONSE=$(curl -s -w "\nHTTP: %{http_code}" http://localhost:8080/tasks 2>/dev/null || echo "Failed to connect")
                 echo "Tasks endpoint response:"
                 echo "$TASKS_RESPONSE"
                 
-                # Check if we can create a new task
-                echo "Testing POST /tasks..."
+                # Check if we can create a new task with completed field
+                echo "Testing POST /tasks with completed field..."
                 curl -X POST http://localhost:8080/tasks \
                   -H "Content-Type: application/json" \
-                  -d '{"title":"Test Task","notes":"This is a test","due_date":"2026-01-20"}' \
+                  -d '{"title":"Test Task with Completion","notes":"This is a test task","due_date":"2026-01-20","completed":false}' \
                   -s -w "\nHTTP: %{http_code}\n"
+                
+                # Test updating a task to mark as completed
+                echo "Testing updating task completion status..."
+                curl -X PUT http://localhost:8080/tasks/1 \
+                  -H "Content-Type: application/json" \
+                  -d '{"completed":true}' \
+                  -s -w "\nHTTP: %{http_code}\n"
+                
+                # Test filtering by completion status
+                echo "Testing GET /tasks?completed=true..."
+                curl -s "http://localhost:8080/tasks?completed=true" | head -c 200
+                echo ""
+                
+                echo "Testing GET /tasks?completed=false..."
+                curl -s "http://localhost:8080/tasks?completed=false" | head -c 200
+                echo ""
             else
                 echo "❌ ERROR: Backend process not running in PM2"
                 echo "PM2 list:"
@@ -263,7 +289,7 @@ Resources:
             echo "✅ Backend setup completed successfully!"
             echo "Time: $(date)"
             echo "Application running on port 8080"
-            echo "Tasks table created with fields: id, title, notes, due_date, created_at, updated_at"
+            echo "Tasks table created with fields: id, title, notes, due_date, completed, created_at, updated_at"
             echo "Endpoints: /tasks (GET, POST, PUT, DELETE)"
             echo "=========================================="
           - RDSEndpoint: !ImportValue RDSEndpoint

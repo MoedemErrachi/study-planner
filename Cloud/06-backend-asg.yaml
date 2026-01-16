@@ -15,156 +15,279 @@ Resources:
         KeyName: my-key
         UserData:
           Fn::Base64: !Sub 
-            - |
-              #!/bin/bash
-              # Log everything to user-data.log
-              exec > >(tee /var/log/user-data.log)
-              exec 2>&1
-              
-              echo "=========================================="
-              echo "Backend Instance Setup Started"
-              echo "Time: $(date)"
-              echo "=========================================="
-              
-              # Update system
-              echo "[1/9] Updating system packages..."
-              yum update -y
-              
-              # Install Node.js 18
-              echo "[2/9] Installing Node.js 18..."
-              curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
-              yum install -y nodejs git mysql
-              
-              # Verify installations
-              echo "Node version: $(node --version)"
-              echo "NPM version: $(npm --version)"
-              echo "MySQL client version: $(mysql --version)"
-              
-              # Clone the repository
-              echo "[3/9] Cloning repository from MoedemErrachi/study-planner..."
-              cd /home/ec2-user
-              git clone https://github.com/MoedemErrachi/study-planner.git
-              cd study-planner/backend
-              
-              echo "Repository cloned successfully"
-              ls -la
-              
-              # Create .env file with correct configuration
-              echo "[4/9] Creating .env file..."
-              cat > .env <<EOF
-              PORT=8080
-              DB_HOST=${RDSEndpoint}
-              DB_PORT=3306
-              DB_USER=admin
-              DB_PASSWORD=Admin12345
-              DB_NAME=studyplanner
-              JWT_SECRET=study-planner-secret-key-change-in-production-12345
-              NODE_ENV=production
-              CORS_ORIGIN=*
-              EOF
-              
-              echo "✅ Environment configuration created:"
-              echo "PORT=8080"
-              echo "DB_HOST=${RDSEndpoint}"
-              echo "DB_NAME=studyplanner"
-              cat .env
-              
-              # Install dependencies
-              echo "[5/9] Installing npm dependencies..."
-              npm install --production
-              
-              # Install PM2 globally
-              echo "[6/9] Installing PM2 process manager..."
-              npm install -g pm2
-              pm2 --version
-              
-              # Wait for database to be ready
-              echo "[7/9] Waiting for database to be ready..."
-              sleep 30
-              
-              # Test database connection with retries
-              echo "[8/9] Testing database connection..."
-              MAX_RETRIES=10
-              RETRY_COUNT=0
-              
-              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-                if mysql -h ${RDSEndpoint} -u admin -pAdmin12345 -e "SELECT 1;" 2>/dev/null; then
-                  echo "✅ Database connection successful!"
-                  break
+          - |
+            #!/bin/bash
+            # Log everything to user-data.log
+            exec > >(tee /var/log/user-data.log)
+            exec 2>&1
+            
+            echo "=========================================="
+            echo "Backend Instance Setup Started"
+            echo "Time: $(date)"
+            echo "=========================================="
+            
+            # Update system
+            echo "[1/9] Updating system packages..."
+            yum update -y
+            
+            # Install git and MariaDB client
+            echo "[2/9] Installing git and MariaDB client..."
+            yum install -y git mariadb105
+            
+            # Install Node.js 22
+            echo "[3/9] Installing Node.js 22..."
+            curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
+            yum install -y nodejs
+            
+            # Verify installations
+            echo "Node version: $(node --version)"
+            echo "NPM version: $(npm --version)"
+            echo "MySQL client version: $(mariadb --version)"
+            
+            # Clone the repository
+            echo "[4/9] Cloning repository from MoedemErrachi/study-planner..."
+            cd /home/ec2-user
+            git clone https://github.com/MoedemErrachi/study-planner.git
+            cd study-planner/server
+            
+            echo "Repository cloned successfully"
+            ls -la
+            
+            # Create .env file with correct configuration
+            echo "[5/9] Creating .env file..."
+            cat > .env <<'EOF'
+            PORT=8080
+            DB_HOST=${RDSEndpoint}
+            DB_PORT=3306
+            DB_USER=admin
+            DB_PASSWORD=Admin12345
+            DB_NAME=studyplanner
+            JWT_SECRET=study-planner-secret-key-change-in-production-12345
+            NODE_ENV=production
+            CORS_ORIGIN=*
+            EOF
+            
+            # Appliquer la substitution pour RDSEndpoint après coup
+            sed -i "s|\${RDSEndpoint}|${RDSEndpoint}|g" .env
+            
+            echo "✅ Environment configuration created:"
+            echo "PORT=8080"
+            echo "DB_HOST=${RDSEndpoint}"
+            echo "DB_NAME=studyplanner"
+            cat .env
+            
+            # Install dependencies
+            echo "[6/9] Installing npm dependencies..."
+            npm install --omit=dev
+            
+            # Install PM2 globally
+            echo "[7/9] Installing PM2 process manager..."
+            npm install -g pm2
+            pm2 --version
+            
+            # Wait for database to be ready
+            echo "[8/9] Waiting for database to be ready..."
+            sleep 30
+            
+            # Test database connection with retries
+            echo "[9/9] Testing database connection..."
+            MAX_RETRIES=10
+            RETRY_COUNT=0
+            
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              if mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -e "SELECT 1;" 2>/dev/null; then
+                echo "✅ Database connection successful!"
+                break
+              else
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                echo "Attempt $RETRY_COUNT/$MAX_RETRIES: Database not ready, waiting 15 seconds..."
+                sleep 15
+              fi
+            done
+            
+            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+              echo "❌ ERROR: Could not connect to database after $MAX_RETRIES attempts"
+              exit 1
+            fi
+            
+            # Create database if it doesn't exist
+            echo "Creating database if needed..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -e "CREATE DATABASE IF NOT EXISTS studyplanner;" 2>&1
+            
+            # Verify database exists
+            echo "Verifying database..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -e "SHOW DATABASES;" 2>&1 | grep studyplanner
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Database 'studyplanner' confirmed"
+            else
+              echo "❌ WARNING: Database 'studyplanner' not found"
+            fi
+            
+            # ==============================================
+            # CREATE TASKS TABLE ONLY
+            # ==============================================
+            echo "Creating tasks table..."
+            
+            # Créer la table tasks avec uniquement les champs demandés + completed
+            cat > /tmp/create_tasks.sql <<'SQL_EOF'
+            USE studyplanner;
+
+            
+            -- Create tasks table with only required fields including completed
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                notes TEXT,
+                due_date DATE NULL,
+                completed BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_completed (completed),
+                INDEX idx_due_date (due_date)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            
+            -- Show created tables
+            SHOW TABLES;
+            
+            -- Show table structure
+            DESCRIBE tasks;
+            
+            -- Show all tasks
+            SELECT * FROM tasks;
+            
+            -- Show completed vs pending tasks
+            SELECT 
+                completed, 
+                COUNT(*) as count 
+            FROM tasks 
+            GROUP BY completed;
+            SQL_EOF
+            
+            # Execute SQL script
+            echo "Executing SQL script to create tasks table..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 < /tmp/create_tasks.sql
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Tasks table created successfully!"
+            else
+              echo "⚠️ Warning: There might have been issues creating the table"
+            fi
+            
+            # Verify tasks table was created
+            echo "Verifying tasks table structure..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -D studyplanner -e "DESCRIBE tasks;" 2>&1
+            
+            # Count rows in tasks table
+            echo "Checking tasks count and completion status..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -D studyplanner -e "SELECT COUNT(*) as total_tasks, SUM(completed) as completed_tasks FROM tasks;" 2>&1
+            
+            # ==============================================
+            # END CREATE TABLES SECTION
+            # ==============================================
+            
+            # Start the application with PM2
+            echo "[10/9] Starting backend application on port 8080..."
+            
+            # Set HOME environment variable for PM2
+            export HOME="/home/ec2-user"
+            export PM2_HOME="/home/ec2-user/.pm2"
+            
+            pm2 start index.js \
+              --name backend \
+              --log /var/log/backend.log \
+              --error /var/log/backend-error.log \
+              --output /var/log/backend-output.log \
+              --time
+            
+            # Configure PM2 to start on boot
+            pm2 startup systemd -u ec2-user --hp /home/ec2-user
+            pm2 save
+            
+            # Set correct permissions
+            echo "Setting file permissions..."
+            chown -R ec2-user:ec2-user /home/ec2-user/study-planner
+            chown -R ec2-user:ec2-user /home/ec2-user/.pm2 2>/dev/null || true
+            
+            # Wait for app to start
+            sleep 15
+            
+            # Verify PM2 is running
+            echo "Checking PM2 status..."
+            pm2 list
+            
+            # Check if backend process is running
+            if pm2 list | grep -q "backend"; then
+                echo "✅ Backend process is running with PM2"
+                
+                # Wait a bit more for app to fully start
+                sleep 5
+                
+                # Test if backend is responding
+                echo "Testing backend endpoints..."
+                
+                # Test health endpoint (if exists)
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null || echo "000")
+                if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "503" ]; then
+                  echo "✅ Backend is responding on port 8080 (HTTP $HTTP_CODE)"
                 else
-                  RETRY_COUNT=$((RETRY_COUNT + 1))
-                  echo "Attempt $RETRY_COUNT/$MAX_RETRIES: Database not ready, waiting 15 seconds..."
-                  sleep 15
+                  echo "⚠️ Backend health endpoint response code: $HTTP_CODE"
                 fi
-              done
-              
-              if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-                echo "❌ ERROR: Could not connect to database after $MAX_RETRIES attempts"
-                exit 1
-              fi
-              
-              # Create database if it doesn't exist
-              echo "Creating database if needed..."
-              mysql -h ${RDSEndpoint} -u admin -pAdmin12345 -e "CREATE DATABASE IF NOT EXISTS studyplanner;" 2>&1
-              
-              # Verify database exists
-              echo "Verifying database..."
-              mysql -h ${RDSEndpoint} -u admin -pAdmin12345 -e "SHOW DATABASES;" 2>&1 | grep studyplanner
-              
-              if [ $? -eq 0 ]; then
-                echo "✅ Database 'studyplanner' confirmed"
-              else
-                echo "❌ WARNING: Database 'studyplanner' not found"
-              fi
-              
-              # Start the application with PM2
-              echo "[9/9] Starting backend application on port 8080..."
-              pm2 start server.js \
-                --name backend \
-                --log /var/log/backend.log \
-                --error /var/log/backend-error.log \
-                --output /var/log/backend-output.log \
-                --time
-              
-              # Configure PM2 to start on boot
-              pm2 startup systemd -u ec2-user --hp /home/ec2-user
-              env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user
-              pm2 save
-              
-              # Set correct permissions
-              echo "Setting file permissions..."
-              chown -R ec2-user:ec2-user /home/ec2-user/study-planner
-              
-              # Wait for app to start
-              sleep 10
-              
-              # Verify PM2 is running
-              echo "Checking PM2 status..."
-              pm2 list
-              pm2 info backend
-              pm2 logs backend --lines 20 --nostream
-              
-              # Test if backend is responding
-              echo "Testing backend API endpoints..."
-              
-              # Test health endpoint
-              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health 2>/dev/null || echo "000")
-              if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ]; then
-                echo "✅ Backend is responding on port 8080 (HTTP $HTTP_CODE)"
-              else
-                echo "⚠️  Backend response code: $HTTP_CODE"
-              fi
-              
-              # Show backend logs
-              echo "Recent backend logs:"
-              tail -20 /var/log/backend.log 2>/dev/null || echo "No logs yet"
-              
-              echo "=========================================="
-              echo "✅ Backend setup completed successfully!"
-              echo "Time: $(date)"
-              echo "Application running on port 8080"
-              echo "=========================================="
-            - RDSEndpoint: !ImportValue RDSEndpoint
+                
+                # Test tasks endpoint directly (without /api prefix)
+                echo "Testing GET /tasks endpoint..."
+                TASKS_RESPONSE=$(curl -s -w "\nHTTP: %{http_code}" http://localhost:8080/tasks 2>/dev/null || echo "Failed to connect")
+                echo "Tasks endpoint response:"
+                echo "$TASKS_RESPONSE"
+                
+                # Check if we can create a new task with completed field
+                echo "Testing POST /tasks with completed field..."
+                curl -X POST http://localhost:8080/tasks \
+                  -H "Content-Type: application/json" \
+                  -d '{"title":"Test Task with Completion","notes":"This is a test task","due_date":"2026-01-20","completed":false}' \
+                  -s -w "\nHTTP: %{http_code}\n"
+                
+                # Test updating a task to mark as completed
+                echo "Testing updating task completion status..."
+                curl -X PUT http://localhost:8080/tasks/1 \
+                  -H "Content-Type: application/json" \
+                  -d '{"completed":true}' \
+                  -s -w "\nHTTP: %{http_code}\n"
+                
+                # Test filtering by completion status
+                echo "Testing GET /tasks?completed=true..."
+                curl -s "http://localhost:8080/tasks?completed=true" | head -c 200
+                echo ""
+                
+                echo "Testing GET /tasks?completed=false..."
+                curl -s "http://localhost:8080/tasks?completed=false" | head -c 200
+                echo ""
+            else
+                echo "❌ ERROR: Backend process not running in PM2"
+                echo "PM2 list:"
+                pm2 list
+                echo "Checking if index.js exists:"
+                ls -la index.js
+            fi
+            
+            # Show backend logs
+            echo "Recent backend logs:"
+            tail -50 /var/log/backend.log 2>/dev/null || echo "No logs yet"
+            
+            # Show database connection info
+            echo "Database connection details:"
+            echo "Host: ${RDSEndpoint}"
+            echo "Database: studyplanner"
+            echo "User: admin"
+            
+            echo "=========================================="
+            echo "✅ Backend setup completed successfully!"
+            echo "Time: $(date)"
+            echo "Application running on port 8080"
+            echo "Tasks table created with fields: id, title, notes, due_date, completed, created_at, updated_at"
+            echo "Endpoints: /tasks (GET, POST, PUT, DELETE)"
+            echo "=========================================="
+          - RDSEndpoint: !ImportValue RDSEndpoint
         TagSpecifications:
           - ResourceType: instance
             Tags:
@@ -190,6 +313,9 @@ Resources:
         - !ImportValue TGBEArn
       HealthCheckType: ELB
       HealthCheckGracePeriod: 300
+      Cooldown: 300
+      TerminationPolicies:
+        - Default
       Tags:
         - Key: Name
           Value: backend-asg-instance
@@ -200,6 +326,58 @@ Resources:
         - Key: Application
           Value: study-planner
           PropagateAtLaunch: true
+
+  CPUUtilizationAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale up if CPU > 70% for 5 minutes
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ASGBackend
+
+  CPUUtilizationAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale down if CPU < 30% for 10 minutes
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 4
+      Threshold: 30
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ASGBackend
+
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ASGBackend
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      Cooldown: 300
+      StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 1
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ASGBackend
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      Cooldown: 600
+      StepAdjustments:
+        - MetricIntervalUpperBound: 0
+          ScalingAdjustment: -1
 
 Outputs:
   LaunchTemplateId:
