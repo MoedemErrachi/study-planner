@@ -14,5 +14,6 @@ aws cloudformation deploy --template-file 08-s3.yaml --stack-name s3
 aws cloudformation deploy --template-file 09-ecs-migration.yaml --stack-name ecs 
 
 aws cloudformation deploy --template-file 10-ec2-backend.yaml --stack-name ec2-backend
-
+aws cloudformation deploy --template-file 11-ec2-frontend.yaml --stack-name ec2-frontend
 aws cloudformation delete-stack --stack-name <bastion>
+

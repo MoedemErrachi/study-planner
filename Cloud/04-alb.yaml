@@ -2,7 +2,6 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: ALB with Frontend and Backend listeners
 
 Resources:
-
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -54,5 +53,19 @@ Resources:
           TargetGroupArn: !Ref TGBE
 
 Outputs:
-  TGFEArn: { Value: !Ref TGFE, Export: { Name: TGFEArn } }
-  TGBEArn: { Value: !Ref TGBE, Export: { Name: TGBEArn } }
+  TGFEArn: 
+    Value: !Ref TGFE
+    Export: 
+      Name: TGFEArn
+  TGBEArn: 
+    Value: !Ref TGBE
+    Export: 
+      Name: TGBEArn
+  ALBDNS:
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: ALBDNS
+  ALBArn:
+    Value: !Ref ALB
+    Export:
+      Name: ALBArn

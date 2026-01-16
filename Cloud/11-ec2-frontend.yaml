@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Frontend EC2 Instance for Testing User Data
+
+Resources:
+  FrontendInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c9645fce9368e34c
+      InstanceType: t3.micro
+      KeyName: my-key
+      SecurityGroupIds:
+        - !ImportValue SGFE
+      SubnetId: !Select [0, !Split [",", !ImportValue PrivateFESubnets]]
+      Tags:
+        - Key: Name
+          Value: frontend-test-instance
+        - Key: Environment
+          Value: production
+        - Key: Application
+          Value: study-planner
+      UserData:
+        Fn::Base64: !Sub 
+          - |
+            #!/bin/bash
+            # Log everything to user-data.log
+            exec > >(tee /var/log/user-data.log)
+            exec 2>&1
+            
+            echo "=========================================="
+            echo "Frontend Instance Setup Started"
+            echo "Time: $(date)"
+            echo "=========================================="
+            
+            # Update system
+            echo "[1/9] Updating system packages..."
+            yum update -y
+            
+            # Install Node.js 22
+            echo "[2/9] Installing Node.js 22..."
+            curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
+            yum install -y nodejs git
+            
+            # Verify Node installation
+            echo "Node version: $(node --version)"
+            echo "NPM version: $(npm --version)"
+            
+            # Install nginx
+            echo "[3/9] Installing nginx..."
+            yum install -y nginx
+            systemctl start nginx
+            systemctl enable nginx
+            echo "Nginx installed and started"
+            
+            # Clone the repository
+            echo "[4/9] Cloning repository from MoedemErrachi/study-planner..."
+            cd /home/ec2-user
+            
+            # Clean up if exists
+            rm -rf study-planner
+            
+            git clone https://github.com/MoedemErrachi/study-planner.git
+            
+            # Vérifier la structure du répertoire
+            echo "Checking repository structure..."
+            ls -la /home/ec2-user/study-planner/
+            
+            # Naviguer vers le répertoire client
+            if [ -d "/home/ec2-user/study-planner/client" ]; then
+                cd /home/ec2-user/study-planner/client
+                echo "✅ Found client directory"
+            else
+                echo "❌ ERROR: 'client' directory not found!"
+                echo "Available directories:"
+                find /home/ec2-user/study-planner -maxdepth 2 -type d
+                exit 1
+            fi
+            
+            echo "Repository cloned successfully"
+            echo "Directory contents:"
+            ls -la
+            
+            # Set correct ownership immediately
+            echo "Setting correct file permissions..."
+            chown -R ec2-user:ec2-user /home/ec2-user/study-planner
+            # Fix: Set execute permissions for node_modules binaries
+            find /home/ec2-user/study-planner/client/node_modules/.bin -type f -exec chmod +x {} \; 2>/dev/null || true
+            
+            # Use the ALB DNS for backend API
+            echo "[5/9] Setting up backend API URL..."
+            echo "Backend ALB DNS: ${ALBDNS}"
+            
+            # Create production environment file
+            echo "[6/9] Creating .env.production file..."
+            
+            # Run as ec2-user to avoid permission issues
+            su - ec2-user -c "
+            cd /home/ec2-user/study-planner/client
+            echo 'VITE_API_BASE=http://${ALBDNS}:8080/api' > .env.production
+            echo 'Backend API configured in .env.production:'
+            cat .env.production
+            "
+            
+            # Fix: Set proper permissions and install dependencies
+            echo "[7/9] Installing npm dependencies..."
+            su - ec2-user -c "
+            cd /home/ec2-user/study-planner/client
+            npm install
+            # Fix: Ensure vite binary has execute permissions
+            chmod +x node_modules/.bin/vite 2>/dev/null || true
+            "
+            
+            echo "[8/9] Building frontend application..."
+            su - ec2-user -c "
+            cd /home/ec2-user/study-planner/client
+            npm run build
+            "
+            
+            # Verify build succeeded
+            if [ -d "/home/ec2-user/study-planner/client/dist" ]; then
+              echo "✅ Build successful! dist folder created"
+              echo "Build contents:"
+              ls -la /home/ec2-user/study-planner/client/dist/
+              
+              # Check for index.html
+              if [ -f "/home/ec2-user/study-planner/client/dist/index.html" ]; then
+                echo "✅ index.html found in dist folder"
+              else
+                echo "⚠️  WARNING: index.html not found in dist folder"
+                echo "Looking for HTML files:"
+                find /home/ec2-user/study-planner/client/dist -name "*.html" -type f
+              fi
+            else
+              echo "❌ ERROR: Build failed - no dist folder found!"
+              echo "Checking for build errors..."
+              # Try to run build again with more output
+              su - ec2-user -c "cd /home/ec2-user/study-planner/client && npm run build 2>&1"
+              exit 1
+            fi
+            
+            # Configure nginx
+            echo "[9/9] Configuring nginx..."
+            
+            # Create nginx config
+            cat > /etc/nginx/conf.d/frontend.conf <<EOF
+            server {
+                listen 80;
+                server_name _;
+                root /home/ec2-user/study-planner/client/dist;
+                index index.html;
+                
+                # Gzip compression
+                gzip on;
+                gzip_vary on;
+                gzip_min_length 1024;
+                gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+                
+                # Security headers
+                add_header X-Frame-Options "SAMEORIGIN" always;
+                add_header X-Content-Type-Options "nosniff" always;
+                add_header X-XSS-Protection "1; mode=block" always;
+                
+                # Serve static files
+                location / {
+                    try_files \$uri \$uri/ /index.html;
+                }
+                
+                # Cache static assets
+                location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)\$ {
+                    expires 1y;
+                    add_header Cache-Control "public, immutable";
+                }
+                
+                # Backend API proxy (optional)
+                location /api/ {
+                    proxy_pass http://${ALBDNS}:8080/api/;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade \$http_upgrade;
+                    proxy_set_header Connection 'upgrade';
+                    proxy_set_header Host \$host;
+                    proxy_cache_bypass \$http_upgrade;
+                    proxy_set_header X-Real-IP \$remote_addr;
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto \$scheme;
+                }
+            }
+            EOF
+            
+            # Remove default nginx config
+            rm -f /etc/nginx/conf.d/default.conf
+            
+            # Test nginx configuration
+            echo "Testing nginx configuration..."
+            nginx -t
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Nginx configuration valid"
+            else
+              echo "❌ ERROR: Nginx configuration invalid!"
+              echo "Checking nginx error log..."
+              tail -20 /var/log/nginx/error.log 2>/dev/null || echo "No error log found"
+              exit 1
+            fi
+            
+            # Restart nginx
+            echo "Restarting nginx..."
+            systemctl restart nginx
+            
+            # Check nginx status
+            echo "Checking nginx status..."
+            systemctl status nginx --no-pager
+            
+            # Set correct permissions one more time
+            echo "Setting final file permissions..."
+            chown -R ec2-user:ec2-user /home/ec2-user/study-planner
+            chmod -R 755 /home/ec2-user/study-planner/client/dist 2>/dev/null || true
+            
+            # Verify nginx is serving content
+            echo "Testing nginx endpoint..."
+            sleep 5  # Wait for nginx to fully restart
+            
+            # Try multiple times to connect
+            HTTP_CODE="000"
+            for i in {1..10}; do
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 2>/dev/null || echo "000")
+              if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+                echo "✅ Nginx is responding on port 80 (HTTP $HTTP_CODE)"
+                
+                # Test if we can serve the frontend
+                echo "Testing frontend page..."
+                curl -s http://localhost:80 | grep -i "<html\|<!DOCTYPE" && echo "✅ HTML content detected" || echo "⚠️  No HTML content found"
+                break
+              else
+                echo "Attempt $i/10: Nginx not responding (HTTP $HTTP_CODE), waiting 3 seconds..."
+                sleep 3
+              fi
+            done
+            
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ] && [ "$HTTP_CODE" != "301" ] && [ "$HTTP_CODE" != "302" ]; then
+              echo "⚠️  WARNING: Nginx may not be serving content properly"
+              echo "Checking nginx processes..."
+              ps aux | grep nginx | grep -v grep
+              echo "Checking port 80..."
+              netstat -tlnp | grep :80 || echo "Nothing listening on port 80"
+              echo "Nginx error logs:"
+              tail -100 /var/log/nginx/error.log 2>/dev/null || echo "No error logs found"
+              echo "Nginx access logs:"
+              tail -50 /var/log/nginx/access.log 2>/dev/null || echo "No access logs found"
+            fi
+            
+            # Show final directory structure
+            echo "Final directory structure:"
+            echo "Frontend path: /home/ec2-user/study-planner/client"
+            ls -la /home/ec2-user/study-planner/client/
+            
+            echo "=========================================="
+            echo "✅ Frontend setup completed successfully!"
+            echo "Time: $(date)"
+            echo "Nginx serving from: /home/ec2-user/study-planner/client/dist"
+            echo "Backend API URL: http://${ALBDNS}:8080/api"
+            echo "Frontend accessible at: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || hostname -i)"
+            echo "=========================================="
+          - ALBDNS: !ImportValue ALBDNS
+
+Outputs:
+  InstanceId:
+    Description: Frontend Test Instance ID
+    Value: !Ref FrontendInstance
+    Export:
+      Name: FrontendTestInstanceId
