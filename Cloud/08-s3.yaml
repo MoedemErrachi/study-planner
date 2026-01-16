@@ -1,0 +1,26 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3 #and CloudFront
+
+Resources:
+
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: student-assets-bucket
+      Tags: [{ Key: Name, Value: student-assets-bucket }]
+
+  # CloudFront:
+  #   Type: AWS::CloudFront::Distribution
+  #   Properties:
+  #     DistributionConfig:
+  #       Enabled: true
+  #       Origins:
+  #         - Id: S3Origin
+  #           DomainName: !GetAtt Bucket.DomainName
+  #           S3OriginConfig: {}
+  #       DefaultCacheBehavior:
+  #         TargetOriginId: S3Origin
+  #         ViewerProtocolPolicy: redirect-to-https
+  #         ForwardedValues: { QueryString: false }
+  #       Comment: Student CloudFront
+  #     Tags: [{ Key: Name, Value: student-cloudfront }]

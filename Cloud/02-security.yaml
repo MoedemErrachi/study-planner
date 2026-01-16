@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Security Groups
+
+Resources:
+
+  SGLB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Load Balancer SG
+      VpcId: !ImportValue VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+      Tags: [{ Key: Name, Value: sg-loadbalancer }]
+
+  SGBE:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Backend SG
+      VpcId: !ImportValue VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref SGLB
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref SGBastion
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          SourceSecurityGroupId: !Ref SGBastion
+      Tags: 
+        - Key: Name
+          Value: sg-backend
+
+  SGFE:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Frontend SG
+      VpcId: !ImportValue VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref SGLB
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref SGBastion
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          SourceSecurityGroupId: !Ref SGBastion
+      Tags:
+        - Key: Name
+          Value: sg-frontend
+
+  SGDB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Database SG
+      VpcId: !ImportValue VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref SGBE
+      Tags: [{ Key: Name, Value: sg-database }]
+
+  SGBastion:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Bastion SG
+      VpcId: !ImportValue VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags: [{ Key: Name, Value: sg-bastion }]
+
+Outputs:
+  SGLB: { Value: !Ref SGLB, Export: { Name: SGLB } }
+  SGFE: { Value: !Ref SGFE, Export: { Name: SGFE } }
+  SGBE: { Value: !Ref SGBE, Export: { Name: SGBE } }
+  SGDB: { Value: !Ref SGDB, Export: { Name: SGDB } }
+  SGBastion: { Value: !Ref SGBastion, Export: { Name: SGBastion } }

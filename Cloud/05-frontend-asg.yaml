@@ -1,0 +1,191 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Frontend Auto Scaling Group
+
+Resources:
+
+  LTFrontend:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: lt-frontend
+      LaunchTemplateData:
+        ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2023
+        InstanceType: t3.micro
+        SecurityGroupIds: 
+          - !ImportValue SGFE
+        KeyName: my-key
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Log everything to user-data.log
+            exec > >(tee /var/log/user-data.log)
+            exec 2>&1
+            
+            echo "=========================================="
+            echo "Frontend Instance Setup Started"
+            echo "Time: $(date)"
+            echo "=========================================="
+            
+            # Update system
+            echo "[1/8] Updating system packages..."
+            yum update -y
+            
+            # Install Node.js 18
+            echo "[2/8] Installing Node.js 18..."
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
+            yum install -y nodejs git
+            
+            # Verify Node installation
+            echo "Node version: $(node --version)"
+            echo "NPM version: $(npm --version)"
+            
+            # Install nginx
+            echo "[3/8] Installing nginx..."
+            yum install -y nginx
+            systemctl start nginx
+            systemctl enable nginx
+            echo "Nginx installed and started"
+            
+            # Clone the repository
+            echo "[4/8] Cloning repository from MoedemErrachi/study-planner..."
+            cd /home/ec2-user
+            git clone https://github.com/MoedemErrachi/study-planner.git
+            cd study-planner/frontend
+            
+            # Get ALB DNS for backend API
+            echo "[5/8] Getting ALB DNS..."
+            ALB_DNS=$(aws elbv2 describe-load-balancers \
+              --query 'LoadBalancers[0].DNSName' \
+              --output text \
+              --region us-east-1 2>/dev/null || echo "localhost")
+            
+            # Create production environment file
+            echo "[6/8] Creating .env.production file..."
+            cat > .env.production <<EOF
+            VITE_API_BASE=http://${!ALB_DNS}:8080/api
+            EOF
+            
+            echo "Backend API configured: http://${!ALB_DNS}:8080/api"
+            cat .env.production
+            
+            # Install dependencies and build
+            echo "[7/8] Installing npm dependencies..."
+            npm install --production
+            
+            echo "[8/8] Building frontend application..."
+            npm run build
+            
+            # Verify build succeeded
+            if [ -d "dist" ]; then
+              echo "✅ Build successful! dist folder created"
+              ls -la dist/
+            else
+              echo "❌ ERROR: Build failed - no dist folder found!"
+              exit 1
+            fi
+            
+            # Configure nginx
+            echo "Configuring nginx..."
+            cat > /etc/nginx/conf.d/frontend.conf <<'EOF'
+            server {
+                listen 80;
+                server_name _;
+                root /home/ec2-user/study-planner/frontend/dist;
+                index index.html;
+                
+                # Gzip compression
+                gzip on;
+                gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+                
+                # Serve static files
+                location / {
+                    try_files $uri $uri/ /index.html;
+                }
+                
+                # Cache static assets
+                location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+                    expires 1y;
+                    add_header Cache-Control "public, immutable";
+                }
+            }
+            EOF
+            
+            # Remove default nginx config
+            rm -f /etc/nginx/conf.d/default.conf
+            
+            # Test nginx configuration
+            echo "Testing nginx configuration..."
+            nginx -t
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Nginx configuration valid"
+            else
+              echo "❌ ERROR: Nginx configuration invalid!"
+              exit 1
+            fi
+            
+            # Restart nginx
+            echo "Restarting nginx..."
+            systemctl restart nginx
+            systemctl status nginx
+            
+            # Set correct permissions
+            echo "Setting file permissions..."
+            chown -R ec2-user:ec2-user /home/ec2-user/study-planner
+            chmod -R 755 /home/ec2-user/study-planner/frontend/dist
+            
+            # Verify nginx is serving content
+            echo "Testing nginx endpoint..."
+            curl -I http://localhost:80 || echo "Warning: Nginx not responding on port 80"
+            
+            echo "=========================================="
+            echo "✅ Frontend setup completed successfully!"
+            echo "Time: $(date)"
+            echo "=========================================="
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: frontend-instance
+              - Key: Environment
+                Value: production
+              - Key: Application
+                Value: study-planner
+
+  ASGFrontend:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: asg-frontend
+      VPCZoneIdentifier: !Split [",", !ImportValue PrivateFESubnets]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LTFrontend
+        Version: !GetAtt LTFrontend.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      TargetGroupARNs: 
+        - !ImportValue TGFEArn
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: frontend-asg-instance
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: production
+          PropagateAtLaunch: true
+        - Key: Application
+          Value: study-planner
+          PropagateAtLaunch: true
+
+Outputs:
+  LaunchTemplateId:
+    Description: Frontend Launch Template ID
+    Value: !Ref LTFrontend
+    Export:
+      Name: FrontendLaunchTemplateId
+  
+  AutoScalingGroupName:
+    Description: Frontend Auto Scaling Group Name
+    Value: !Ref ASGFrontend
+    Export:
+      Name: FrontendASGName

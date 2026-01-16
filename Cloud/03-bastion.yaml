@@ -1,0 +1,15 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Bastion Host
+
+Resources:
+  Bastion:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-0c02fb55956c7d316
+      SubnetId: !Select [0, !Split [",", !ImportValue PublicSubnets]]
+      SecurityGroupIds: [!ImportValue SGBastion]
+      KeyName: my-key
+      Tags:
+        - Key: Name
+          Value: bastion-host

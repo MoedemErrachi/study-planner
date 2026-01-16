@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Backend EC2 Instance for Testing User Data
+
+Resources:
+  BackendInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c9645fce9368e34c  # Nouvelle Amazon Linux 2023 AMI
+      InstanceType: t3.micro
+      KeyName: my-key
+      SecurityGroupIds:
+        - !ImportValue SGBE
+      SubnetId: !Select [0, !Split [",", !ImportValue PrivateBESubnets]]
+      Tags:
+        - Key: Name
+          Value: backend-test-instance
+        - Key: Environment
+          Value: production
+        - Key: Application
+          Value: study-planner
+      UserData:
+        Fn::Base64: !Sub 
+          - |
+            #!/bin/bash
+            # Log everything to user-data.log
+            exec > >(tee /var/log/user-data.log)
+            exec 2>&1
+            
+            echo "=========================================="
+            echo "Backend Instance Setup Started"
+            echo "Time: $(date)"
+            echo "=========================================="
+            
+            # Update system
+            echo "[1/9] Updating system packages..."
+            yum update -y
+            
+            # Install git and MariaDB client
+            echo "[2/9] Installing git and MariaDB client..."
+            yum install -y git mariadb105
+            
+            # Install Node.js 22
+            echo "[3/9] Installing Node.js 22..."
+            curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
+            yum install -y nodejs
+            
+            
+            # Verify installations
+            echo "Node version: $(node --version)"
+            echo "NPM version: $(npm --version)"
+            echo "MySQL client version: $(mariadb --version)"
+            
+            # Clone the repository
+            echo "[4/9] Cloning repository from MoedemErrachi/study-planner..."
+            cd /home/ec2-user
+            git clone https://github.com/MoedemErrachi/study-planner.git
+            cd study-planner/server
+            
+            echo "Repository cloned successfully"
+            ls -la
+            
+            # Create .env file with correct configuration
+            echo "[5/9] Creating .env file..."
+            cat > .env <<EOF
+            PORT=8080
+            DB_HOST=${RDSEndpoint}
+            DB_PORT=3306
+            DB_USER=admin
+            DB_PASSWORD=Admin12345
+            DB_NAME=studyplanner
+            JWT_SECRET=study-planner-secret-key-change-in-production-12345
+            NODE_ENV=production
+            CORS_ORIGIN=*
+            EOF
+            
+            echo "✅ Environment configuration created:"
+            echo "PORT=8080"
+            echo "DB_HOST=${RDSEndpoint}"
+            echo "DB_NAME=studyplanner"
+            cat .env
+            
+            # Install dependencies
+            echo "[6/9] Installing npm dependencies..."
+            npm install --production
+            
+            # Install PM2 globally
+            echo "[7/9] Installing PM2 process manager..."
+            npm install -g pm2
+            pm2 --version
+            
+            # Wait for database to be ready
+            echo "[8/9] Waiting for database to be ready..."
+            sleep 30
+            
+            # Test database connection with retries
+            echo "[9/9] Testing database connection..."
+            MAX_RETRIES=10
+            RETRY_COUNT=0
+            
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              if mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -e "SELECT 1;" 2>/dev/null; then
+                echo "✅ Database connection successful!"
+                break
+              else
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                echo "Attempt $RETRY_COUNT/$MAX_RETRIES: Database not ready, waiting 15 seconds..."
+                sleep 15
+              fi
+            done
+            
+            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+              echo "❌ ERROR: Could not connect to database after $MAX_RETRIES attempts"
+              exit 1
+            fi
+            
+            # Create database if it doesn't exist
+            echo "Creating database if needed..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -e "CREATE DATABASE IF NOT EXISTS studyplanner;" 2>&1
+            
+            # Verify database exists
+            echo "Verifying database..."
+            mariadb -h ${RDSEndpoint} -u admin -pAdmin12345 -e "SHOW DATABASES;" 2>&1 | grep studyplanner
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Database 'studyplanner' confirmed"
+            else
+              echo "❌ WARNING: Database 'studyplanner' not found"
+            fi
+            
+            # Start the application with PM2
+            echo "[10/9] Starting backend application on port 8080..."
+            pm2 start server.js \
+              --name backend \
+              --log /var/log/backend.log \
+              --error /var/log/backend-error.log \
+              --output /var/log/backend-output.log \
+              --time
+            
+            # Configure PM2 to start on boot
+            pm2 startup systemd -u ec2-user --hp /home/ec2-user
+            env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user
+            pm2 save
+            
+            # Set correct permissions
+            echo "Setting file permissions..."
+            chown -R ec2-user:ec2-user /home/ec2-user/study-planner
+            
+            # Wait for app to start
+            sleep 10
+            
+            # Verify PM2 is running
+            echo "Checking PM2 status..."
+            pm2 list
+            pm2 info backend
+            pm2 logs backend --lines 20 --nostream
+            
+            # Test if backend is responding
+            echo "Testing backend API endpoints..."
+            
+            # Test health endpoint
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ]; then
+              echo "✅ Backend is responding on port 8080 (HTTP $HTTP_CODE)"
+            else
+              echo "⚠️  Backend response code: $HTTP_CODE"
+            fi
+            
+            # Show backend logs
+            echo "Recent backend logs:"
+            tail -20 /var/log/backend.log 2>/dev/null || echo "No logs yet"
+            
+            echo "=========================================="
+            echo "✅ Backend setup completed successfully!"
+            echo "Time: $(date)"
+            echo "Application running on port 8080"
+            echo "=========================================="
+
+          - RDSEndpoint: !ImportValue RDSEndpoint
+
+Outputs:
+  InstanceId:
+    Description: Backend Test Instance ID
+    Value: !Ref BackendInstance
+    Export:
+      Name: BackendTestInstanceId

@@ -1,0 +1,10 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS Migration Base
+
+Resources:
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: student-ecs-cluster
+      Tags: [{ Key: Name, Value: student-ecs-cluster }]

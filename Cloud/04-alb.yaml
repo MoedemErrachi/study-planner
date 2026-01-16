@@ -1,0 +1,58 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ALB with Frontend and Backend listeners
+
+Resources:
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: student-alb
+      Subnets: !Split [",", !ImportValue PublicSubnets]
+      SecurityGroups: [!ImportValue SGLB]
+      Scheme: internet-facing
+      Type: application
+      Tags: [{ Key: Name, Value: student-alb }]
+
+  TGFE:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-frontend
+      VpcId: !ImportValue VPCId
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      Tags: [{ Key: Name, Value: tg-frontend }]
+
+  TGBE:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-backend
+      VpcId: !ImportValue VPCId
+      Port: 8080
+      Protocol: HTTP
+      TargetType: instance
+      Tags: [{ Key: Name, Value: tg-backend }]
+
+  ListenerFE:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TGFE
+
+  ListenerBE:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 8080
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TGBE
+
+Outputs:
+  TGFEArn: { Value: !Ref TGFE, Export: { Name: TGFEArn } }
+  TGBEArn: { Value: !Ref TGBE, Export: { Name: TGBEArn } }

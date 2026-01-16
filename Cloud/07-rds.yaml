@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: RDS MySQL Multi-AZ
+
+Resources:
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: DB subnets
+      SubnetIds: !Split [",", !ImportValue PrivateDBSubnets]
+      Tags:
+        - Key: Name
+          Value: db-subnet-group
+
+  RDS:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: mysql
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      MasterUsername: admin
+      MasterUserPassword: Admin12345
+      DBName: studyplanner
+      MultiAZ: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!ImportValue SGDB]
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      Tags:
+        - Key: Name
+          Value: student-rds-mysql
+
+Outputs:
+  RDSEndpoint:
+    Description: RDS MySQL Endpoint Address
+    Value: !GetAtt RDS.Endpoint.Address
+    Export:
+      Name: RDSEndpoint
+  
+  RDSPort:
+    Description: RDS MySQL Port
+    Value: !GetAtt RDS.Endpoint.Port
+    Export:
+      Name: RDSPort
+  
+  DBName:
+    Description: Database Name
+    Value: studyplanner
+    Export:
+      Name: DBName
